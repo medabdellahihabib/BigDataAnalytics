@@ -2,142 +2,166 @@ import org.apache.spark.sql.SparkSession
 import org.apache.spark.sql.functions._
 
 val spark = SparkSession.builder()
-  .appName("Titanic_ML_Updated")
+  .appName("TitanicAnalysis")
   .getOrCreate()
 
-// ================= LOAD DATA =================
+// =================== LOAD DATA ===================
 val df = spark.read
   .option("header", "true")
   .option("inferSchema", "true")
   .csv("/opt/spark/data/titanic.csv")
 
-println(s"Rows: ${df.count()} | Columns: ${df.columns.length}")
+println(s"Nombre de lignes : ${df.count()}")
+println(s"Nombre de colonnes : ${df.columns.length}")
 df.printSchema()
 
 df.groupBy("sex").count().show()
 df.groupBy("pclass", "survived").count().show()
 
+// Comptage des valeurs nulles
 df.select(df.columns.map(c => count(when(col(c).isNull, c)).alias(c)):_*).show()
 
-// ================= CLEANING & ENCODING =================
+// =================== CLEANING & ENCODING ===================
 val df2 = df.select("survived", "pclass", "sex", "age", "fare", "embarked", "class")
 
-// Replace missing age with mean
+// Remplacer Age manquants par moyenne
 val ageMean = df2.select(mean("age")).first().getDouble(0)
 val dfFilled = df2.na.fill(Map("age" -> ageMean))
 
-val dfEnc = dfFilled
-  .withColumn("sex_int", when(col("sex") === "male", 0).otherwise(1))
-  .withColumn("class_int",
-    when(col("class") === "First", 1)
-      .when(col("class") === "Second", 2)
-      .when(col("class") === "Third", 3)
-      .otherwise(4)
-  )
-  .withColumn("embarked_int",
-    when(col("embarked") === "S", 1)
-      .when(col("embarked") === "C", 2)
-      .when(col("embarked") === "Q", 3)
-      .otherwise(4)
-  )
-  .drop("pclass", "sex", "embarked", "class")
+// Encode sexe
+val dfSexEncoded = dfFilled.withColumn("sex_int",
+  when(col("sex") === "male", 0)
+    .when(col("sex") === "female", 1)
+    .otherwise(2)
+)
 
-val dfFinal = dfEnc
+// Renommer
+val dfRenamed = dfSexEncoded.withColumnRenamed("class", "class_str")
+
+// Encoder class
+val dfClassEncoded = dfRenamed.withColumn("class_int",
+  when(col("class_str") === "First", 1)
+    .when(col("class_str") === "Second", 2)
+    .when(col("class_str") === "Third", 3)
+    .otherwise(4)
+)
+
+// Encoder embarked
+val dfEmbarked = dfClassEncoded.withColumn("embarked_int",
+  when(col("embarked") === "S", 1)
+    .when(col("embarked") === "C", 2)
+    .when(col("embarked") === "Q", 3)
+    .otherwise(4)
+)
+
+// Dataset final
+val dfFinal = dfEmbarked.drop("pclass", "sex", "embarked", "class_str")
 dfFinal.show(5)
 
-// ================= TRAIN/TEST SPLIT =================
+
+// =================== TRAIN / TEST ===================
 val Array(trainData, testData) = dfFinal.randomSplit(Array(0.8, 0.2), seed = 42)
 
-// ================= VECTOR ASSEMBLER =================
+
+// =================== VECTOR ASSEMBLER ===================
 import org.apache.spark.ml.feature.VectorAssembler
 
 val assembler = new VectorAssembler()
   .setInputCols(Array("age", "fare", "sex_int", "class_int", "embarked_int"))
   .setOutputCol("features")
 
-// ================= PIPELINE: Logistic Regression =================
+val trainAssembled = assembler.transform(trainData)
+val testAssembled = assembler.transform(testData)
+
+
+// =================== LOGISTIC REGRESSION ===================
 import org.apache.spark.ml.classification.LogisticRegression
-import org.apache.spark.ml.Pipeline
 
 val lr = new LogisticRegression()
   .setLabelCol("survived")
   .setFeaturesCol("features")
 
-val lrPipeline = new Pipeline().setStages(Array(assembler, lr))
-val lrModel = lrPipeline.fit(trainData)
+val lrModel = lr.fit(trainAssembled)
+val lrPredictions = lrModel.transform(testAssembled)
 
-val lrPred = lrModel.transform(testData)
-lrPred.select("survived", "probability", "prediction").show(10)
+lrPredictions.select("survived", "probability", "prediction").show(10)
 
-// ================= METRICS =================
-import org.apache.spark.ml.evaluation.{BinaryClassificationEvaluator, MulticlassClassificationEvaluator}
+import org.apache.spark.ml.evaluation.BinaryClassificationEvaluator
 
-val aucEval = new BinaryClassificationEvaluator()
+val evaluator = new BinaryClassificationEvaluator()
   .setLabelCol("survived")
 
-val accEval = new MulticlassClassificationEvaluator()
+val lrAuc = evaluator.evaluate(lrPredictions)
+println(f"AUC Régression Logistique = $lrAuc%.4f")
+
+
+// =================== NAIVE BAYES ===================
+import org.apache.spark.ml.classification.NaiveBayes
+
+val nb = new NaiveBayes()
+  .setLabelCol("survived")
+  .setFeaturesCol("features")
+  .setModelType("multinomial")
+
+val nbModel = nb.fit(trainAssembled)
+val nbPredictions = nbModel.transform(testAssembled)
+
+nbPredictions.select("survived", "probability", "prediction").show(10)
+
+val nbAuc = evaluator.evaluate(nbPredictions)
+println(f"AUC Naive Bayes = $nbAuc%.4f")
+
+
+// =================== SAVE MODELS ===================
+val lrModelPath = "/opt/spark/work-dir/logistic_regression_model"
+val nbModelPath = "/opt/spark/work-dir/naive_bayes_model"
+
+lrModel.write.overwrite().save(lrModelPath)
+nbModel.write.overwrite().save(nbModelPath)
+
+println("✅ Models saved.")
+
+
+// =================== LOAD MODELS ===================
+import org.apache.spark.ml.classification.{ LogisticRegressionModel, NaiveBayesModel }
+
+val lrLoaded = LogisticRegressionModel.load(lrModelPath)
+val nbLoaded = NaiveBayesModel.load(nbModelPath)
+
+val lrTestPred = lrLoaded.transform(testAssembled)
+val nbTestPred = nbLoaded.transform(testAssembled)
+
+
+// =================== ACCURACY + RMSE ===================
+import org.apache.spark.ml.evaluation.{MulticlassClassificationEvaluator, RegressionEvaluator}
+
+val accuracyEval = new MulticlassClassificationEvaluator()
   .setLabelCol("survived")
   .setPredictionCol("prediction")
   .setMetricName("accuracy")
 
-val f1Eval = new MulticlassClassificationEvaluator()
+val rmseEval = new RegressionEvaluator()
   .setLabelCol("survived")
   .setPredictionCol("prediction")
-  .setMetricName("f1")
+  .setMetricName("rmse")
 
-println("==== Logistic Regression ====")
-println(f"AUC = ${aucEval.evaluate(lrPred)}%.4f")
-println(f"Accuracy = ${accEval.evaluate(lrPred)}%.4f")
-println(f"F1-score = ${f1Eval.evaluate(lrPred)}%.4f")
+// LR Train/Test
+val lrTrainPred = lrLoaded.transform(trainAssembled)
+val lrTrainAcc = accuracyEval.evaluate(lrTrainPred)
+val lrTrainRmse = rmseEval.evaluate(lrTrainPred)
 
-// ================= CONFUSION MATRIX =================
-val cm = lrPred.groupBy("survived", "prediction").count()
-println("=== Confusion Matrix ===")
-cm.show()
+val lrTestAcc = accuracyEval.evaluate(lrTestPred)
+val lrTestRmse = rmseEval.evaluate(lrTestPred)
 
-// ================= RANDOM FOREST =================
-import org.apache.spark.ml.classification.RandomForestClassifier
+println("=== Régression Logistique ===")
+println(f"Accuracy train: $lrTrainAcc%.4f, RMSE train: $lrTrainRmse%.4f")
+println(f"Accuracy test : $lrTestAcc%.4f, RMSE test : $lrTestRmse%.4f")
 
-val rf = new RandomForestClassifier()
-  .setLabelCol("survived")
-  .setFeaturesCol("features")
-  .setNumTrees(100)
+// NB Train/Test
+val nbTrainPred = nbLoaded.transform(trainAssembled)
+val nbTrainAcc = accuracyEval.evaluate(nbTrainPred)
+val nbTestAcc = accuracyEval.evaluate(nbTestPred)
 
-val rfPipeline = new Pipeline().setStages(Array(assembler, rf))
-val rfModel = rfPipeline.fit(trainData)
-
-val rfPred = rfModel.transform(testData)
-
-println("==== Random Forest ====")
-println(f"AUC = ${aucEval.evaluate(rfPred)}%.4f")
-println(f"Accuracy = ${accEval.evaluate(rfPred)}%.4f")
-println(f"F1-score = ${f1Eval.evaluate(rfPred)}%.4f")
-
-rfPred.groupBy("survived", "prediction").count().show()
-
-// ================= DECISION TREE =================
-import org.apache.spark.ml.classification.DecisionTreeClassifier
-
-val dt = new DecisionTreeClassifier()
-  .setLabelCol("survived")
-  .setFeaturesCol("features")
-
-val dtPipeline = new Pipeline().setStages(Array(assembler, dt))
-val dtModel = dtPipeline.fit(trainData)
-
-val dtPred = dtModel.transform(testData)
-
-println("==== Decision Tree ====")
-println(f"AUC = ${aucEval.evaluate(dtPred)}%.4f")
-println(f"Accuracy = ${accEval.evaluate(dtPred)}%.4f")
-println(f"F1-score = ${f1Eval.evaluate(dtPred)}%.4f")
-
-dtPred.groupBy("survived", "prediction").count().show()
-
-// ================= SAVE MODELS =================
-lrModel.write.overwrite().save("/opt/spark/work-dir/log_reg_pipeline")
-rfModel.write.overwrite().save("/opt/spark/work-dir/random_forest_pipeline")
-dtModel.write.overwrite().save("/opt/spark/work-dir/decision_tree_pipeline")
-
-println("✅ Models saved successfully!")
-
+println("=== Naive Bayes ===")
+println(f"Accuracy train: $nbTrainAcc%.4f")
+println(f"Accuracy test : $nbTestAcc%.4f")
