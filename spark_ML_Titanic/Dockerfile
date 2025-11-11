@@ -1,25 +1,17 @@
-# ✅ Base image Spark
+# Base image Spark
 FROM apache/spark:3.5.1
 
-# ✅ Exposer les ports importants
-EXPOSE 4040   # Spark UI
-EXPOSE 8080   # History / Web UI
-EXPOSE 7077   # Spark master
+# Exposer les ports pour Spark UI et master/worker
+EXPOSE 4040
+EXPOSE 8080
+EXPOSE 7077
 
-# ✅ Installer Python deps + numpy
+# Installer numpy
 USER root
-RUN apt-get update -y && apt-get install -y python3 python3-pip && \
-    pip install --no-cache-dir numpy pandas matplotlib
+RUN pip install --no-cache-dir numpy
 
-# ✅ Créer répertoires pour les scripts et données
-RUN mkdir -p /opt/spark/work-dir /opt/spark/data /opt/spark/models
-
-# ✅ Copier ton dataset Titanic & scripts Spark
-COPY titanic.csv /opt/spark/data/
-COPY titanic.scala /opt/spark/work-dir/
-
-# ✅ Remettre l’utilisateur spark
+# Revenir à l'utilisateur spark (optionnel, sécurité)
 USER spark
 
-# ✅ Commande par défaut → ouvre bash
+# Lancer bash par défaut
 CMD ["/bin/bash"]

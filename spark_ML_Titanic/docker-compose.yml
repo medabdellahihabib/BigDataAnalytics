@@ -1,16 +1,13 @@
-version: "3.8"
-
 services:
   spark:
     image: apache/spark:3.5.1
     container_name: spark-shell
     ports:
-      - "4040:4040"   # Spark UI
+      - "4040:4040"   # Spark app UI
       - "8085:8080"   # Spark Master UI
       - "7078:7077"   # Spark Master port
     volumes:
       - ./data:/data
-      - ./scripts:/opt/spark/work-dir
-    command: ["/bin/bash"]
+    command: /bin/bash
     stdin_open: true
     tty: true
